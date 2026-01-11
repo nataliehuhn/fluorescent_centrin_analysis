@@ -33,11 +33,11 @@ cmap = mcolors.LinearSegmentedColormap.from_list(
 
 
 def process_single_file(
-    path,
-    spacing,
-    mag_cutoff,
-    lk_params,
-    time_per_frame
+        path,
+        spacing,
+        mag_cutoff,
+        lk_params,
+        time_per_frame
 ):
     base, _ = os.path.splitext(path)
     print(f"\nProcessing file: {path}")
@@ -248,7 +248,6 @@ for mtoc_speed, top10_def in zip(speeds_list, deformations_list):
     all_corrs.append(corr)
     all_lags.append(lag_times)
 
-
 max_neg_lag = max(lags[0] for lags in all_lags)
 max_pos_lag = min(lags[-1] for lags in all_lags)
 
@@ -319,7 +318,6 @@ for vector, top10_def in zip(vectors_list, deformations_list):
     all_corrs.append(corr)
     all_lags.append(lag_times)
 
-
 max_neg_lag = max(lags[0] for lags in all_lags)
 max_pos_lag = min(lags[-1] for lags in all_lags)
 
@@ -369,6 +367,3 @@ plt.grid(True)
 plt.tight_layout()
 plt.savefig(folder + r"\ALL_FILES_boot_crosscorr_vector_ci_min" + str(min_frames) + r".png")
 # plt.show()
-
-
-
