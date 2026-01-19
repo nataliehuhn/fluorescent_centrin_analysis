@@ -16,6 +16,7 @@ from skimage.filters import gaussian
 from scipy.signal import savgol_filter
 from scipy.ndimage import gaussian_filter1d
 from scipy.interpolate import splprep, splev
+from scipy.signal import find_peaks
 
 
 def read_image(path):
@@ -584,3 +585,216 @@ def plot_single_cross_correlation_vector(
     # plt.show()
     plt.close()
 
+
+# ======================================================
+# 1) PEAK DETECTION
+# ======================================================
+def detect_deformation_peaks(
+        deformation,
+        prominence=0.25,
+        distance=10
+):
+    """
+    Detect peaks in deformation timeseries.
+    Returns array of peak indices (in full array coordinates).
+    """
+    deformation = np.asarray(deformation, float)
+    valid = ~np.isnan(deformation)
+    idx_valid = np.where(valid)[0]
+    d_valid = deformation[valid]
+
+    if len(d_valid) < 3:
+        return np.array([])
+
+    peaks, _ = find_peaks(d_valid, prominence=prominence, distance=distance)
+    return idx_valid[peaks]
+
+
+# ======================================================
+# 2) WINDOW EXTRACTION
+# ======================================================
+def extract_window(signal, center_index, window):
+    """
+    Extract a centered window [center-window : center+window].
+    Pads with NaNs when sequence is too short.
+    """
+    signal = np.asarray(signal, float)
+    N = len(signal)
+    start = max(center_index - window, 0)
+    end = min(center_index + window + 1, N)
+
+    seg = signal[start:end]
+
+    expected = 2 * window + 1
+    if len(seg) < expected:
+        seg = np.pad(seg, (0, expected - len(seg)), constant_values=np.nan)
+
+    return seg
+
+
+# ======================================================
+# 3) EVENT-TRIGGERED CROSS-CORRELATION PIPELINE
+# ======================================================
+def event_triggered_cross_correlation(
+        mtoc_speed,
+        deformation,
+        time_per_frame,
+        window=20,
+        prominence=0.2,
+        min_distance=10,
+        min_points=3
+):
+    mtoc_speed = np.asarray(mtoc_speed, float)
+    deformation = np.asarray(deformation, float)
+
+    # Detect peaks
+    peaks = detect_deformation_peaks(
+        deformation,
+        prominence=prominence,
+        distance=min_distance
+    )
+
+    if len(peaks) == 0:
+        return []
+
+    results = []
+
+    for p in peaks:
+        sw = extract_window(mtoc_speed, p, window)
+        dw = extract_window(deformation, p, window)
+
+        valid = ~np.isnan(sw) & ~np.isnan(dw)
+        sw = sw[valid]
+        dw = dw[valid]
+
+        if len(sw) < min_points:
+            continue
+
+        # Normalize
+        s = (sw - np.mean(sw)) / (np.std(sw) + 1e-9)
+        d = (dw - np.mean(dw)) / (np.std(dw) + 1e-9)
+
+        # Full cross-correlation
+        corr_full = np.correlate(s, d, mode="full") / len(s)
+        lags_full = np.arange(-len(s)+1, len(s))
+
+        # Truncate to ±window frames
+        lag_mask = (lags_full >= -window) & (lags_full <= window)
+        corr = corr_full[lag_mask]
+        lag_times = lags_full[lag_mask] * time_per_frame
+
+        results.append({
+            "peak": p,
+            "window_speed": sw,
+            "window_def": dw,
+            "lag_times": lag_times,
+            "corr": corr,
+            "seg_speed": sw,
+            "seg_def": dw
+        })
+
+    return results
+
+
+# ======================================================
+# 4) ALIGN + AGGREGATE CROSS-CORRELATIONS
+# ======================================================
+def aggregate_event_triggered_events(results, window, time_per_frame):
+    """
+    Aggregate event-triggered windows (each peak is an event)
+    and compute mean ± 95% CI across all events.
+
+    Args:
+        results: list of dicts from event_triggered_cross_correlation()
+        window: half-width of the window in frames
+        time_per_frame: seconds per frame
+
+    Returns:
+        dict with:
+            - "t": time axis relative to peak
+            - "matrix": all events (peaks) stacked
+            - "mean": mean across events
+            - "lower": 2.5 percentile
+            - "upper": 97.5 percentile
+        or None if no valid events
+    """
+    if len(results) == 0:
+        return None
+
+    # Only keep entries with a valid "signal"
+    valid_results = [r for r in results if "signal" in r and r["signal"] is not None]
+    if len(valid_results) == 0:
+        return None
+
+    n_events = len(valid_results)
+    print("number of events: ", n_events)
+    matrix = np.full((n_events, 2 * window + 1), np.nan)
+
+    for i, r in enumerate(valid_results):
+        sig = np.asarray(r["signal"], float)
+        L = len(sig)
+        if L < 2 * window + 1:
+            sig = np.pad(sig, (0, 2 * window + 1 - L), constant_values=np.nan)
+        matrix[i] = sig
+
+    # Skip empty slices
+    if np.all(np.isnan(matrix)):
+        return None
+
+    mean_trace = np.nanmean(matrix, axis=0)
+    lower_ci = np.nanpercentile(matrix, 2.5, axis=0)
+    upper_ci = np.nanpercentile(matrix, 97.5, axis=0)
+
+    t = np.arange(-window, window + 1) * time_per_frame
+
+    return {
+        "t": t,
+        "matrix": matrix,
+        "mean": mean_trace,
+        "lower": lower_ci,
+        "upper": upper_ci
+    }
+
+
+def plot_event_triggered(results, summary, base_name):
+    """
+    Plot individual peak-triggered curves + mean + CI.
+    """
+    if (results is None) or (summary is None):
+        print(f"No usable peaks: {base_name}")
+        return
+
+    plt.figure(figsize=(10, 6))
+
+    # individual curves (optional: plot relative to peak)
+    for r in results:
+        if "lag_times" in r and r["lag_times"] is not None:
+            plt.plot(r["lag_times"], r["corr"], alpha=0.3, linewidth=1)
+
+    # confidence interval
+    plt.fill_between(
+        summary["t"],
+        summary["lower"],
+        summary["upper"],
+        color="gray",
+        alpha=0.3
+    )
+
+    # mean curve
+    plt.plot(
+        summary["t"],
+        summary["mean"],
+        color="blue",
+        linewidth=3,
+        label="Mean"
+    )
+
+    plt.axvline(0, color="k", linestyle="--", alpha=0.5)
+    plt.xlabel("Lag (s)")
+    plt.ylabel("Cross-correlation")
+    plt.title("Peak-triggered cross-correlation")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(base_name + "_peak_triggered_correlation.png", dpi=300, transparent=True)
+    plt.close()

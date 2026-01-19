@@ -21,7 +21,7 @@ lk_params = dict(
     criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03)
 )
 
-folder = r"Y:\nhuhn\Microscopy\Confocal\centrin_deformation_batch"
+folder = r"Y:\nhuhn\Microscopy\Confocal\centrin_deformation_batch\deformation_events_cropped"
 
 mag_cutoff = 5
 time_per_frame = 15  # seconds per frame
@@ -178,6 +178,33 @@ def process_single_file(
         save_path=overlay_path
     )
 
+    '''
+    try:
+        results = hf.event_triggered_cross_correlation(
+            mtoc_speed,
+            top10_deformations,
+            time_per_frame,
+            window=20,
+            prominence=0.27,
+            min_distance=8
+        )
+
+        # Plot each peak individually for this file
+        for r in results:
+            plt.figure(figsize=(6, 4))
+            plt.plot(r['lag_times'], r['corr'], color='blue')
+            plt.axvline(0, color='k', linestyle='--')
+            plt.xlabel("Lag (s)")
+            plt.ylabel("Cross-correlation")
+            plt.title(f"Peak at frame {r['peak']}")
+            plt.tight_layout()
+            plt.savefig(base + f"_peak_{r['peak']}_crosscorr.png", dpi=300)
+            plt.close()
+
+    except Exception as e:
+        print(f"Warning: Event-triggered CC failed for {path}: {e}")
+    '''
+
     return mtoc_speed, vector_lengths, top10_deformations
 
 
@@ -229,17 +256,41 @@ def process_folder(folder_path):
 # append all speeds, all vectors and all deformations to one array
 all_mtoc_speed, all_vector_lengths, all_top10_def, speeds_list, vectors_list, deformations_list = process_folder(folder)
 
+
+'''
+# cross-correlation for detected peaks
+# ====================================
+# EVENT-TRIGGERED CROSS-CORRELATION (ALL FILES)
+# ====================================
+all_results = []
+for speed, deform in zip(speeds_list, deformations_list):
+    res = hf.event_triggered_cross_correlation(
+        speed,
+        deform,
+        time_per_frame,
+        window=20,  # same ±window
+        prominence=0.27,
+        min_distance=8
+    )
+    for r in res:
+        r['signal'] = (r['seg_speed'] - np.nanmean(r['seg_speed'])) / (np.nanstd(r['seg_speed']) + 1e-9)
+    all_results.extend(res)
+
+summary = hf.aggregate_event_triggered_events(all_results, window=20, time_per_frame=time_per_frame)
+hf.plot_event_triggered(all_results, summary, folder + r"\ALL_EVENTS_summary")
+'''
+
 # cross correlation of appended data - mtoc speed and deformation, mtoc-middle-distance and deformation
 all_corrs = []
 all_lags = []
-min_frames = 30
+min_frames = 20
 
 for mtoc_speed, top10_def in zip(speeds_list, deformations_list):
     lag_times, corr = hf.cross_correlate_single_file(
         mtoc_speed,
         top10_def,
         time_per_frame,
-        min_frames=30
+        min_frames=min_frames
     )
 
     if corr is None:
@@ -295,21 +346,21 @@ plt.title("Cross-correlation: MTOC speed vs deformation")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
-plt.savefig(folder + r"\ALL_FILES_boot_crosscorr_ci_min" + str(min_frames) + r".png")
+plt.savefig(folder + r"\ALL_FILES_boot_crosscorr_ci_min" + str(min_frames) + r".png", transparent=True)
 # plt.show()
 
 
 # cross correlation of appended data - mtoc speed and deformation, mtoc-middle-distance and deformation
 all_corrs = []
 all_lags = []
-min_frames = 30
+min_frames = 20
 
 for vector, top10_def in zip(vectors_list, deformations_list):
     lag_times, corr = hf.cross_correlate_single_file(
         vector,
         top10_def,
         time_per_frame,
-        min_frames=30
+        min_frames=min_frames
     )
 
     if corr is None:
@@ -365,5 +416,5 @@ plt.title("Cross-correlation: Vector MTOC-Center vs deformation")
 plt.legend()
 plt.grid(True)
 plt.tight_layout()
-plt.savefig(folder + r"\ALL_FILES_boot_crosscorr_vector_ci_min" + str(min_frames) + r".png")
+plt.savefig(folder + r"\ALL_FILES_boot_crosscorr_vector_ci_min" + str(min_frames) + r".png", transparent=True)
 # plt.show()
