@@ -126,7 +126,7 @@ all_com_speed, all_top10_def, speeds_list, deformations_list = process_folder(fo
 # CROSS-CORRELATION ACROSS FILES
 all_corrs = []
 all_lags = []
-min_frames = 20
+min_frames = 30
 
 for com_speed, top10_def in zip(speeds_list, deformations_list):
     lag_times, corr = hf.cross_correlate_single_file(

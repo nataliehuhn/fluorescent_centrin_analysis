@@ -3,20 +3,18 @@ import tifffile as tiff
 import numpy as np
 from skimage.registration import phase_cross_correlation
 from scipy.ndimage import shift
-import trackpy as tp
-import pandas as pd
 import matplotlib.pyplot as plt
 from skimage.filters import threshold_otsu
-from skimage.morphology import closing, disk, remove_small_holes, remove_small_objects
+from skimage.morphology import remove_small_holes, remove_small_objects
 from skimage.measure import label
-from skimage.morphology import dilation, disk
 import cv2
 from scipy.ndimage import distance_transform_edt
 from skimage.filters import gaussian
-from scipy.signal import savgol_filter
 from scipy.ndimage import gaussian_filter1d
 from scipy.interpolate import splprep, splev
 from scipy.signal import find_peaks
+from scipy.ndimage import center_of_mass
+from scipy.spatial import cKDTree
 
 
 def read_image(path):
@@ -180,6 +178,58 @@ def get_mask_center(mask_frame):
     return x_center, y_center
 
 
+def get_mask_center_com(mask_frame):
+    """
+    Compute the center of mass of a single binary mask.
+    Returns (x, y) coordinates or None if mask is empty.
+    """
+    if mask_frame.sum() == 0:
+        return None
+
+    # SciPy returns (y, x)
+    y_center, x_center = center_of_mass(mask_frame)
+    return float(x_center), float(y_center)
+
+
+def compute_mask_centers_com(mask):
+    """
+    Compute the center of mass for each frame in a (T, H, W) mask tensor.
+    Returns (T, 2) array with (x, y) or NaN for empty masks.
+    """
+    T = mask.shape[0]
+    centers = np.full((T, 2), np.nan, dtype=float)
+
+    for i in range(T):
+        frame = mask[i]
+        if frame.sum() == 0:
+            continue
+
+        y, x = center_of_mass(frame)
+        centers[i] = [x, y]
+
+    return centers
+
+
+def compute_com_coords(mask):
+    """
+    Compute center of mass for each frame in a (T, H, W) binary mask.
+    Return array (T, 2) with (x, y). NaN for empty masks.
+    """
+    T = mask.shape[0]
+    coords = np.full((T, 2), np.nan, dtype=float)
+
+    for i in range(T):
+        frame = mask[i]
+        if frame.sum() == 0:
+            continue
+
+        # center_of_mass returns (y, x)
+        y, x = center_of_mass(frame)
+        coords[i] = [x, y]
+
+    return coords
+
+
 def compute_mask_centers(mask):
     """
     Compute EDT maxima for each frame in mask (T,H,W).
@@ -210,7 +260,7 @@ def compute_deformations_max_area(ch2_corr, cell_mask, p0_grid, mag_cutoff, lk_p
     all_deformations = []
     all_p0 = []
 
-    avg_template = np.mean(ch2_corr, axis=0)  # ch2_corr[0]
+    avg_template = np.mean(ch2_corr, axis=0)  # np.mean(ch2_corr, axis=0)  # ch2_corr[0]
     avg_template_uint8 = np.clip(avg_template, 0, 255).astype(np.uint8)
 
     for i in range(t_frames):
@@ -381,6 +431,7 @@ def brightest_to_edt_vector_along_spline(coords, mask_centers, tck, frame_idx):
     return dx, dy, distance, direction_sign
 
 
+"""
 def plot_mtoc_speed_and_deformation(
     base,
     mtoc_speed,
@@ -388,11 +439,10 @@ def plot_mtoc_speed_and_deformation(
     max10_deformations,
     time_per_frame=15
 ):
-    """
-    Generate two plots:
-    1) MTOC speed vs deformation
-    2) MTOC vector length vs deformation
-    """
+    # Generate two plots:
+    # 1) MTOC speed vs deformation
+    # 2) MTOC vector length vs deformation
+
 
     vector_length = np.asarray(vector_length, dtype=float)
     max10_deformations = np.asarray(max10_deformations, dtype=float)
@@ -405,9 +455,9 @@ def plot_mtoc_speed_and_deformation(
     # =========================================================
     fig, ax1 = plt.subplots(figsize=(10, 5))
 
-    ax1.plot(t, mtoc_speed, color="blue", label="MTOC speed")
+    ax1.plot(t, mtoc_speed, color="blue", label="speed")
     ax1.set_xlabel("Time (s)")
-    ax1.set_ylabel("MTOC speed (px/s)", color="blue")
+    ax1.set_ylabel("speed (px/s)", color="blue")
     ax1.tick_params(axis="y", labelcolor="blue")
     ax1.grid(True, linestyle="--", alpha=0.5)
 
@@ -420,7 +470,7 @@ def plot_mtoc_speed_and_deformation(
     lines2, labels2 = ax2.get_legend_handles_labels()
     ax1.legend(lines1 + lines2, labels1 + labels2, loc="upper right")
 
-    plt.title("MTOC speed and deformation over time")
+    plt.title("speed and deformation over time")
     plt.tight_layout()
     plt.savefig(base + "_speed_deformation.png", dpi=300)
 
@@ -447,6 +497,62 @@ def plot_mtoc_speed_and_deformation(
     plt.title("MTOC distance and deformation over time")
     plt.tight_layout()
     plt.savefig(base + "_distance_deformation.png", dpi=300, transparent=True)
+"""
+
+
+def plot_mtoc_speed_and_deformation(
+        base,
+        mtoc_speed,
+        vector_length,
+        deformation,
+        time_per_frame=15
+):
+    """
+    vector_length=None → skip second panel
+    """
+
+    mtoc_speed = np.asarray(mtoc_speed)
+    deformation = np.asarray(deformation)
+
+    T = len(mtoc_speed)
+    t = np.arange(T) * time_per_frame
+
+    if vector_length is None:
+        # 1-plot mode
+        plt.figure(figsize=(8, 4))
+        plt.plot(t, mtoc_speed, label="COM speed", color="blue")
+        plt.plot(t, deformation, label="Top 10% deformation", color="red")
+        plt.xlabel("Time (s)")
+        plt.ylabel("Value")
+        plt.title("COM speed and cell deformation")
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig(base + "_com_deformation.png", transparent=True)
+        plt.close()
+        return
+
+    # 2-plot mode
+    vector_length = np.asarray(vector_length)
+    t2 = np.arange(len(vector_length)) * time_per_frame
+
+    fig, ax = plt.subplots(2, 1, figsize=(8, 7), sharex=True)
+
+    ax[0].plot(t, mtoc_speed, label="COM speed", color="blue")
+    ax[0].plot(t, deformation, label="Top 10% deformation", color="red")
+    ax[0].set_ylabel("Value")
+    ax[0].legend()
+    ax[0].grid(True)
+
+    ax[1].plot(t2, vector_length, label="Vector magnitude", color="black")
+    ax[1].set_xlabel("Time (s)")
+    ax[1].set_ylabel("Vector length")
+    ax[1].legend()
+    ax[1].grid(True)
+
+    plt.tight_layout()
+    plt.savefig(base + "_com_vector_deformation.png", transparent=True)
+    plt.close()
 
 
 def cross_correlate_single_file(
@@ -490,10 +596,10 @@ def plot_cross_correlation(lag_times, corr, path):
 
     plt.xlabel("Lag (seconds)")
     plt.ylabel("Cross-correlation")
-    plt.title("Cross-correlation: MTOC movement vs. deformation")
+    plt.title("Cross-correlation: movement vs. deformation")
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig(path + "_speed_def_crosscorr_plot.png", dpi=300, transparent=True)
+    plt.savefig(path + "_speed_def_crosscorr_plot_com.png", dpi=300, transparent=True)
     # plt.show()
     plt.close()
 
@@ -533,11 +639,11 @@ def plot_single_cross_correlation(
 
     plt.xlabel("Lag (s)")
     plt.ylabel("Cross-correlation")
-    plt.title("MTOC speed vs deformation")
+    plt.title("speed vs deformation")
     plt.grid(True)
     plt.tight_layout()
 
-    plt.savefig(base + "_single_crosscorr_speed.png", dpi=300, transparent=True)
+    plt.savefig(base + "_single_crosscorr_speed_com.png", dpi=300, transparent=True)
     # plt.show()
     plt.close()
 
@@ -608,6 +714,86 @@ def detect_deformation_peaks(
 
     peaks, _ = find_peaks(d_valid, prominence=prominence, distance=distance)
     return idx_valid[peaks]
+
+
+def compute_inward_deformation_metric(
+    all_deformations,
+    all_p0,
+    mask,
+    percentile=90,
+    min_cosine=0.0
+):
+    """
+    Compute a per-frame scalar deformation metric based on inward-pointing vectors.
+
+    Parameters
+    ----------
+    all_deformations : list of (N_i, 2) arrays
+        Optical flow deformation vectors per frame.
+    all_p0 : list of (N_i, 2) arrays
+        Grid points corresponding to deformation vectors per frame.
+    mask : (T, H, W) bool or int array
+        Cell mask per frame.
+    percentile : float, optional
+        Percentile of inward deformation magnitudes to report (default: 90).
+    min_cosine : float, optional
+        Minimum cosine(angle) to consider a vector inward-pointing.
+        0.0   → strictly inward
+        0.5   → strongly inward
+        < 0.0 → include slightly tangential vectors
+
+    Returns
+    -------
+    inward_metric : (T,) float array
+        Per-frame inward deformation metric (NaN if undefined).
+    """
+
+    T = len(all_deformations)
+    inward_metric = np.full(T, np.nan)
+
+    for i in range(T):
+        deformations = all_deformations[i]
+        p0 = all_p0[i]
+
+        if deformations.size == 0 or p0.size == 0:
+            continue
+
+        object_points = np.argwhere(mask[i])
+        if object_points.size == 0:
+            continue
+
+        # Nearest mask pixel to each p0
+        tree = cKDTree(object_points)
+        _, idx = tree.query(p0[:, ::-1])
+        nearest_points = object_points[idx][:, ::-1]
+
+        # Direction toward the cell
+        to_object = nearest_points - p0
+        to_obj_mag = np.linalg.norm(to_object, axis=1)
+        to_obj_mag[to_obj_mag == 0] = np.nan
+        to_obj_norm = to_object / to_obj_mag[:, None]
+
+        # Deformation vectors
+        deform_mag = np.linalg.norm(deformations, axis=1)
+        deform_mag[(deform_mag == 0) | np.isnan(deform_mag)] = np.nan
+        deform_norm = deformations / deform_mag[:, None]
+
+        # Cosine of angle between deformation and inward direction
+        cos_angles = np.einsum("ij,ij->i", to_obj_norm, deform_norm)
+
+        inward_mask = cos_angles > min_cosine
+        if not np.any(inward_mask):
+            continue
+
+        inward_magnitudes = deform_mag[inward_mask]
+        inward_magnitudes = inward_magnitudes[np.isfinite(inward_magnitudes)]
+
+        if inward_magnitudes.size > 0:
+            inward_metric[i] = np.nanpercentile(
+                inward_magnitudes, percentile
+            )
+
+    return inward_metric
 
 
 # ======================================================
